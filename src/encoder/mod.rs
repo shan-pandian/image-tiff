@@ -543,6 +543,21 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         Ok(())
     }
 
+    pub fn write_chunk_with_compression(&mut self, value: &[T::Inner]) -> TiffResult<()>
+    where
+        [T::Inner]: TiffValue,
+    {
+        
+
+        self.encoder
+            .writer
+            .set_compression(self.compression.get_algorithm());
+        let result = self.write_chunk(value);
+        self.encoder.writer.reset_compression();
+        result
+        
+    }
+
     /// Write a single strip.
     pub fn write_strip(&mut self, value: &[T::Inner]) -> TiffResult<()>
     where

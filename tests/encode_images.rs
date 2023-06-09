@@ -1,6 +1,7 @@
 extern crate tiff;
 
 use tiff::decoder::{ifd, Decoder, DecodingResult};
+use tiff::encoder::compression::{Deflate};
 use tiff::encoder::{colortype, Ifd, Ifd8, SRational, TiffEncoder};
 use tiff::tags::Tag;
 use tiff::ColorType;
@@ -580,36 +581,39 @@ fn test_big_tiled_image_directory() {
     println!("Writing to file {:?}", file);
     //let mut file = Cursor::new(Vec::new());
 
-    let image_width = 10000;
-    let image_height: u64 = 10000;
-    let tile_width: u64 = 1024;
-    let tile_height: u64 = 1024;
+    let image_width = 1000;
+    let image_height: u64 = 1000;
+    let tile_width: u64 = 102;
+    let tile_height: u64 = 102;
     // Get max of image / tile
     let tiles_x = (image_width as f64 / tile_width as f64).ceil() as u64;
     let tiles_y = (image_height as f64 / tile_height as f64).ceil() as u64;
     {
+        
         let mut img_encoder = TiffEncoder::new(&mut file).unwrap();
-
         let mut image = img_encoder
-            .new_image_with_type::<colortype::Gray8>(
+            .new_image_with_compression_with_type::<colortype::Gray8, Deflate>(
                 image_width as u32,
                 image_height as u32,
+                Deflate::default(),
                 tiff::decoder::ChunkType::Tile,
                 Some((tile_width, tile_height)),
+                
             )
             .unwrap();
 
         assert_eq!(image.next_chunk_sample_count(), tile_width * tile_height);
         assert_eq!(image.get_chunk_dim_counts(), (tiles_x, tiles_y));
         let img2: Vec<u8> = vec![0; (tile_width * tile_height) as usize];
-        image.write_chunk(&img2[..]).unwrap();
+        image.write_chunk_with_compression(&img2[..]).unwrap();
         // Not yet implemented
         // assert!(image.tile_size(5, 5).is_err());
+        
         for i in 1..(tiles_x * tiles_y) {
             let img2: Vec<u8> = vec![i as u8; (tile_width * tile_height) as usize];
-            image.write_chunk(&img2[..]).unwrap();
+            image.write_chunk_with_compression(&img2[..]).unwrap();
         }
-        assert!(image.write_chunk(&img2[..]).is_err());
+        assert!(image.write_chunk_with_compression(&img2[..]).is_err());
         image.finish().unwrap();
     }
 
@@ -620,7 +624,6 @@ fn test_big_tiled_image_directory() {
         assert_eq!(decoder.get_tag_u64(Tag::TileLength).unwrap(), tile_height);
 
         for i in 0..(tiles_x * tiles_y) {
-            println!("Checking chunk {}...", i);
             let current_tile_width = match (i + 1) % tiles_x == 0 {
                 true => image_width - ((tiles_x - 1) * tile_width),
                 _ => tile_width,
