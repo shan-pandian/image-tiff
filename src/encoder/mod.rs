@@ -352,16 +352,16 @@ pub struct ImageEncoder<
     width: u32,
     height: u32,
     chunk_byte_count: Vec<K::OffsetType>,
+    chunk_offsets: Vec<K::OffsetType>,
     dropped: bool,
     compression: D,
     _phantom: ::std::marker::PhantomData<C>,
     chunk_height: u64,
     chunks_per_col: u64,
     // Data specific for tiles
-    chunks_per_row: u64,
-    chunk_width: u64,
-    chunk_offsets: Vec<K::OffsetType>,
-    chunk_type: ChunkType,
+    chunks_per_row: u64, // 1 for stripped images
+    chunk_width: u64, // `width` for images
+    chunk_type: ChunkType, // Lives in decoder. Should be shared?
 }
 
 impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
