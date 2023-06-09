@@ -527,3 +527,114 @@ fn test_rows_per_strip() {
         }
     }
 }
+
+#[test]
+fn test_tiled_image_directory() {
+    let mut file = Cursor::new(Vec::new());
+    {
+        let mut img_encoder = TiffEncoder::new(&mut file).unwrap();
+
+        let mut image = img_encoder
+            .new_image_with_type::<colortype::Gray8>(
+                100,
+                100,
+                tiff::decoder::ChunkType::Tile,
+                Some((25, 25)),
+            )
+            .unwrap();
+        assert_eq!(image.next_chunk_sample_count(), 25 * 25);
+        assert_eq!(image.get_chunk_dim_counts(), (4, 4));
+        let img2: Vec<u8> = vec![0; 25 * 25];
+        image.write_chunk(&img2[..]).unwrap();
+        // Not yet implemented
+        // assert!(image.tile_size(5, 5).is_err());
+        for i in 1..16 {
+            let img2: Vec<u8> = vec![i as u8; 25 * 25];
+            image.write_chunk(&img2[..]).unwrap();
+        }
+        assert!(image.write_chunk(&img2[..]).is_err());
+        image.finish().unwrap();
+    }
+
+    file.seek(SeekFrom::Start(0)).unwrap();
+    {
+        let mut decoder = Decoder::new(&mut file).unwrap();
+        assert_eq!(decoder.get_tag_u64(Tag::TileWidth).unwrap(), 25);
+        assert_eq!(decoder.get_tag_u64(Tag::TileLength).unwrap(), 25);
+
+        for i in 0..16 {
+            let img2 = [i as u8; 25 * 25];
+            match decoder.read_chunk(i as u32).unwrap() {
+                DecodingResult::U8(data) => assert_eq!(&img2[..], &data[..]),
+                other => panic!("Incorrect strip type {:?}", other),
+            }
+        }
+    }
+}
+
+#[test]
+fn test_big_tiled_image_directory() {
+    // Create a test file in /tmp
+    let tmp_file = tempfile::NamedTempFile::new().unwrap();
+    let mut file = tmp_file.reopen().unwrap();
+    println!("Writing to file {:?}", file);
+    //let mut file = Cursor::new(Vec::new());
+
+    let image_width = 10000;
+    let image_height: u64 = 10000;
+    let tile_width: u64 = 1024;
+    let tile_height: u64 = 1024;
+    // Get max of image / tile
+    let tiles_x = (image_width as f64 / tile_width as f64).ceil() as u64;
+    let tiles_y = (image_height as f64 / tile_height as f64).ceil() as u64;
+    {
+        let mut img_encoder = TiffEncoder::new(&mut file).unwrap();
+
+        let mut image = img_encoder
+            .new_image_with_type::<colortype::Gray8>(
+                image_width as u32,
+                image_height as u32,
+                tiff::decoder::ChunkType::Tile,
+                Some((tile_width, tile_height)),
+            )
+            .unwrap();
+
+        assert_eq!(image.next_chunk_sample_count(), tile_width * tile_height);
+        assert_eq!(image.get_chunk_dim_counts(), (tiles_x, tiles_y));
+        let img2: Vec<u8> = vec![0; (tile_width * tile_height) as usize];
+        image.write_chunk(&img2[..]).unwrap();
+        // Not yet implemented
+        // assert!(image.tile_size(5, 5).is_err());
+        for i in 1..(tiles_x * tiles_y) {
+            let img2: Vec<u8> = vec![i as u8; (tile_width * tile_height) as usize];
+            image.write_chunk(&img2[..]).unwrap();
+        }
+        assert!(image.write_chunk(&img2[..]).is_err());
+        image.finish().unwrap();
+    }
+
+    file.seek(SeekFrom::Start(0)).unwrap();
+    {
+        let mut decoder = Decoder::new(&mut file).unwrap();
+        assert_eq!(decoder.get_tag_u64(Tag::TileWidth).unwrap(), tile_width);
+        assert_eq!(decoder.get_tag_u64(Tag::TileLength).unwrap(), tile_height);
+
+        for i in 0..(tiles_x * tiles_y) {
+            println!("Checking chunk {}...", i);
+            let current_tile_width = match (i + 1) % tiles_x == 0 {
+                true => image_width - ((tiles_x - 1) * tile_width),
+                _ => tile_width,
+            };
+            let current_tile_height = match i >= (tiles_x * tiles_y) - tiles_x {
+                true => image_height - ((tiles_y - 1) * tile_height),
+                _ => tile_height,
+            };
+
+            let img2 = vec![i as u8; (current_tile_width * current_tile_height) as usize];
+            match decoder.read_chunk(i as u32).unwrap() {
+                DecodingResult::U8(data) => assert_eq!(&img2[..], &data[..]),
+                other => panic!("Incorrect strip type {:?}", other),
+            }
+        }
+    }
+}
