@@ -232,3 +232,11 @@ pub enum SampleFormat(u16) unknown("An unknown extension sample format") {
     Void = 4,
 }
 }
+
+tags! {
+    pub enum SubfileType(u16) {
+        FullResolutionImage = 1,
+        ReducedResolutionImage = 2,
+        SinglePageOfMultiPageImage = 3,
+    }
+}
