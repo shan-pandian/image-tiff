@@ -240,3 +240,12 @@ tags! {
         SinglePageOfMultiPageImage = 3,
     }
 }
+
+tags! {
+    pub enum NewSubfileType(u16) {
+        FullResolutionImage = 0,
+        ReducedResolutionImage = 1,
+        SinglePageOfMultiPageImage = 2,
+        TransparencyMask = 4,
+    }
+}
