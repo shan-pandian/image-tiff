@@ -13,7 +13,7 @@ use std::{
 use crate::{
     decoder::ChunkType,
     error::TiffResult,
-    tags::{CompressionMethod, ResolutionUnit, Tag},
+    tags::{CompressionMethod, ResolutionUnit, Tag, SubfileType},
     TiffError, TiffFormatError,
 };
 
@@ -429,8 +429,6 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
                 let (chunk_width, chunk_height) = chunk_dims
                     .expect("Must supply a valid tile size when constructing a tiled image");
                 let data_unit_size = u64::try_from(<T>::BITS_PER_SAMPLE.len())?;
-                // Limit the strip size to prevent potential memory and security issues.
-                // Also keep the multiple strip handling 'oiled'
                 (data_unit_size, chunk_height, chunk_width)
             }
         };
@@ -629,6 +627,11 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
     /// Set image y-resolution
     pub fn y_resolution(&mut self, value: Rational) {
         self.encoder.write_tag(Tag::YResolution, value).unwrap();
+    }
+
+    /// Set image subfiletype
+    pub fn subfiletype(&mut self, value: SubfileType) {
+        self.encoder.write_tag(Tag::SubfileType, value.to_u16()).unwrap();
     }
 
     pub fn get_chunk_dim_counts(&self) -> (u64, u64) {
