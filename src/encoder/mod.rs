@@ -565,6 +565,10 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
                     self.chunk_offsets.push(K::convert_offset(offset)?);
                     self.chunk_byte_count.push(byte_count.try_into()?);
                     self.data_idx += 1;
+                    
+                    if self.data_idx % 100 == 0 {
+                        println!("{} chunks written", self.data_idx);
+                    }
                 }
                 tasks = Vec::new();
             }
