@@ -547,7 +547,7 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
     // chunk_writer_from stream
     pub async fn write_chunks_from_stream(
         &mut self,
-        stream: impl Stream<Item = Result<&[u8], Box<dyn std::error::Error + Send + Sync>>>
+        stream: impl Stream<Item = Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>
     ) -> TiffResult<()> {
         let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>> = Vec::new();
         let mut pin = Box::pin(stream);
