@@ -35,6 +35,9 @@ pub enum TiffError {
     /// limits of the platform size or limits of the format.
     IntSizeError,
 
+    /// An error occured in one of the encoder threads.
+    ThreadError,
+
     /// The image does not support the requested operation
     UsageError(UsageError),
 }
@@ -251,6 +254,7 @@ impl fmt::Display for TiffError {
             TiffError::IoError(ref e) => e.fmt(fmt),
             TiffError::LimitsExceeded => write!(fmt, "The Decoder limits are exceeded"),
             TiffError::IntSizeError => write!(fmt, "Platform or format size limits exceeded"),
+            TiffError::ThreadError => write!(fmt, "An error occured in one of the encoder threads"),
             TiffError::UsageError(ref e) => write!(fmt, "Usage error: {}", e),
         }
     }
@@ -264,6 +268,7 @@ impl Error for TiffError {
             TiffError::IoError(..) => "IO error",
             TiffError::LimitsExceeded => "Decoder limits exceeded",
             TiffError::IntSizeError => "Platform or format size limits exceeded",
+            TiffError::ThreadError => "An error occured in one of the encoder threads",
             TiffError::UsageError(..) => "Invalid usage",
         }
     }

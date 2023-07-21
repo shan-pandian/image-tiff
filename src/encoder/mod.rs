@@ -1,3 +1,4 @@
+use futures::{Stream, StreamExt, lock::Mutex,  future::join_all};
 pub use tiff_value::*;
 
 use std::{
@@ -7,8 +8,9 @@ use std::{
     io::{self, Seek, Write},
     marker::PhantomData,
     mem,
-    num::TryFromIntError,
+    num::TryFromIntError, sync:: Arc, 
 };
+
 
 use crate::{
     decoder::ChunkType,
@@ -25,6 +27,7 @@ mod writer;
 use self::colortype::*;
 use self::compression::*;
 use self::writer::*;
+
 
 /// Encoder for Tiff and BigTiff files.
 ///
@@ -540,6 +543,63 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         self.data_idx += 1;
         Ok(())
     }
+
+    // chunk_writer_from stream
+    pub async fn write_chunks_from_stream(
+        &mut self,
+        stream: impl Stream<Item = Result<&[u8], Box<dyn std::error::Error + Send + Sync>>>
+    ) -> TiffResult<()> {
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>> = Vec::new();
+        let mut pin = Box::pin(stream);
+        let compression = Arc::new(Mutex::new(self.compression.get_algorithm().clone()));
+
+        while let Some(slice_result) = pin.next().await {
+            if tasks.len() == 8 {
+                for result in join_all(tasks).await {
+                    let compressed_data = result.unwrap().unwrap();
+                    let byte_count = compressed_data.len();
+                    let offset = self.encoder.writer.offset();
+                    self.encoder.writer.write_bytes(&compressed_data)?;
+                    self.chunk_offsets.push(K::convert_offset(offset)?);
+                    self.chunk_byte_count.push(byte_count.try_into()?);
+                    self.data_idx += 1;
+                }
+                tasks = Vec::new();
+            }
+
+            match slice_result {
+                Ok(slice) => {
+                    let data = slice.to_vec(); // clone the slice to move it into the closure
+                    let compression = Arc::clone(&compression); // clone the Arc to move it into the closure
+                    tasks.push(tokio::spawn(async move {
+                        let mut compressed_data = Vec::new();
+                        let mut compression = compression.lock().await;
+                        match compression.write_to(&mut compressed_data, &data) {
+                            Ok(_) => Ok(compressed_data),
+                            Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+                        }
+                    }));
+                },
+                Err(_) => return Err(TiffError::ThreadError),
+            }
+        }
+        
+        if !tasks.is_empty() {
+            for result in join_all(tasks).await {
+                let compressed_data = result.unwrap().unwrap();
+                let byte_count = compressed_data.len();
+                let offset = self.encoder.writer.offset();
+                self.encoder.writer.write_bytes(&compressed_data)?;
+                self.chunk_offsets.push(K::convert_offset(offset)?);
+                self.chunk_byte_count.push(byte_count.try_into()?);
+                self.data_idx += 1;
+            }
+        }        
+        
+        TiffResult::from(Ok(()))
+
+    }
+
 
     pub fn write_chunk_with_compression(&mut self, value: &[T::Inner]) -> TiffResult<()>
     where
