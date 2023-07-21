@@ -553,6 +553,8 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         let mut pin = Box::pin(stream);
         let compression = Arc::new(Mutex::new(self.compression.get_algorithm().clone()));
 
+        let n = 0;
+
         while let Some(slice_result) = pin.next().await {
             if tasks.len() == 8 {
                 for result in join_all(tasks).await {
@@ -593,6 +595,9 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
                 self.chunk_offsets.push(K::convert_offset(offset)?);
                 self.chunk_byte_count.push(byte_count.try_into()?);
                 self.data_idx += 1;
+                if self.data_idx % 100 == 0 {
+                    println!("{} chunks written", self.data_idx);
+                }
             }
         }        
         
