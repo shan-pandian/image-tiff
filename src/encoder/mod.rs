@@ -579,8 +579,8 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
                     let compression = Arc::clone(&compression); // clone the Arc to move it into the closure
                     tasks.push(tokio::spawn(async move {
                         let mut compressed_data = Vec::new();
-                        let mut compression = compression.lock().await;
-                        match compression.write_to(&mut compressed_data, &data) {
+                        let mut compressor = compression.lock().await.clone();
+                        match compressor.write_to(&mut compressed_data, &data) {
                             Ok(_) => Ok(compressed_data),
                             Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
                         }
