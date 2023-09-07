@@ -1,3 +1,4 @@
+use futures::{Stream, StreamExt, lock::Mutex,  future::join_all};
 pub use tiff_value::*;
 
 use std::{
@@ -7,12 +8,14 @@ use std::{
     io::{self, Seek, Write},
     marker::PhantomData,
     mem,
-    num::TryFromIntError,
+    num::TryFromIntError, sync:: Arc, 
 };
 
+
 use crate::{
+    decoder::ChunkType,
     error::TiffResult,
-    tags::{CompressionMethod, ResolutionUnit, Tag},
+    tags::{CompressionMethod, ResolutionUnit, Tag, SubfileType, NewSubfileType},
     TiffError, TiffFormatError,
 };
 
@@ -24,6 +27,7 @@ mod writer;
 use self::colortype::*;
 use self::compression::*;
 use self::writer::*;
+
 
 /// Encoder for Tiff and BigTiff files.
 ///
@@ -106,6 +110,17 @@ impl<W: Write + Seek, K: TiffKind> TiffEncoder<W, K> {
         ImageEncoder::new(encoder, width, height)
     }
 
+    pub fn new_image_with_type<C: ColorType>(
+        &mut self,
+        width: u32,
+        height: u32,
+        chunk_type: ChunkType,
+        chunk_dims: Option<(u64, u64)>,
+    ) -> TiffResult<ImageEncoder<W, C, K, Uncompressed>> {
+        let encoder = DirectoryEncoder::new(&mut self.writer)?;
+        ImageEncoder::new_with_type(encoder, width, height, chunk_type, chunk_dims)
+    }
+
     /// Create an [`ImageEncoder`] to encode an image one slice at a time.
     pub fn new_image_with_compression<C: ColorType, D: Compression>(
         &mut self,
@@ -115,6 +130,19 @@ impl<W: Write + Seek, K: TiffKind> TiffEncoder<W, K> {
     ) -> TiffResult<ImageEncoder<W, C, K, D>> {
         let encoder = DirectoryEncoder::new(&mut self.writer)?;
         ImageEncoder::with_compression(encoder, width, height, compression)
+    }
+    
+    /// Create an [`ImageEncoder`] to encode an image one slice at a time.
+    pub fn new_image_with_compression_with_type<C: ColorType, D: Compression>(
+        &mut self,
+        width: u32,
+        height: u32,
+        compression: D,
+        chunk_type: ChunkType,
+        chunk_dims: Option<(u64, u64)>,
+    ) -> TiffResult<ImageEncoder<W, C, K, D>> {
+        let encoder = DirectoryEncoder::new(&mut self.writer)?;
+        ImageEncoder::with_compression_with_type(encoder, width, height, compression, chunk_type, chunk_dims)
     }
 
     /// Convenience function to write an entire image from memory.
@@ -321,17 +349,22 @@ pub struct ImageEncoder<
     D: Compression = Uncompressed,
 > {
     encoder: DirectoryEncoder<'a, W, K>,
-    strip_idx: u64,
-    strip_count: u64,
-    row_samples: u64,
+    data_idx: u64,
+    chunk_count: u64,
+    data_unit_size: u64,
     width: u32,
     height: u32,
-    rows_per_strip: u64,
-    strip_offsets: Vec<K::OffsetType>,
-    strip_byte_count: Vec<K::OffsetType>,
+    chunk_byte_count: Vec<K::OffsetType>,
+    chunk_offsets: Vec<K::OffsetType>,
     dropped: bool,
     compression: D,
     _phantom: ::std::marker::PhantomData<C>,
+    chunk_height: u64,
+    chunks_per_col: u64,
+    // Data specific for tiles
+    chunks_per_row: u64, // 1 for stripped images
+    chunk_width: u64, // `width` for images
+    chunk_type: ChunkType, // Lives in decoder. Should be shared?
 }
 
 impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
@@ -344,31 +377,68 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         Self::with_compression(encoder, width, height, D::default())
     }
 
+    fn new_with_type(
+        encoder: DirectoryEncoder<'a, W, K>,
+        width: u32,
+        height: u32,
+        chunk_type: ChunkType,
+        chunk_dims: Option<(u64, u64)>,
+    ) -> TiffResult<Self>
+    where
+        D: Default,
+    {
+        Self::with_compression_with_type(encoder, width, height, D::default(), chunk_type, chunk_dims)
+    }
+
     fn with_compression(
+        encoder: DirectoryEncoder<'a, W, K>,
+        width: u32,
+        height: u32,
+        compression: D,
+    ) -> TiffResult<Self> {
+        Self::with_compression_with_type(encoder, width, height, compression, ChunkType::Strip, None)
+    }
+
+    fn with_compression_with_type(
         mut encoder: DirectoryEncoder<'a, W, K>,
         width: u32,
         height: u32,
         compression: D,
+        chunk_type: ChunkType,
+        chunk_dims: Option<(u64, u64)>,
     ) -> TiffResult<Self> {
         if width == 0 || height == 0 {
             return Err(TiffError::FormatError(TiffFormatError::InvalidDimensions(
                 width, height,
             )));
         }
+        let (data_unit_size, chunk_height, chunk_width) = match chunk_type {
+            ChunkType::Strip => {
+                let data_unit_size = u64::try_from(<T>::BITS_PER_SAMPLE.len())?;
+                let row_bytes = data_unit_size * u64::from(width) * u64::from(<T::Inner>::BYTE_LEN);
+                // Limit the strip size to prevent potential memory and security issues.
+                // Also keep the multiple strip handling 'oiled'
+                let chunk_height = {
+                    match D::COMPRESSION_METHOD {
+                        CompressionMethod::PackBits => 1, // Each row must be packed separately. Do not compress across row boundaries
+                        _ => (1_000_000 + row_bytes - 1) / row_bytes,
+                    }
+                };
 
-        let row_samples = u64::from(width) * u64::try_from(<T>::BITS_PER_SAMPLE.len())?;
-        let row_bytes = row_samples * u64::from(<T::Inner>::BYTE_LEN);
-
-        // Limit the strip size to prevent potential memory and security issues.
-        // Also keep the multiple strip handling 'oiled'
-        let rows_per_strip = {
-            match D::COMPRESSION_METHOD {
-                CompressionMethod::PackBits => 1, // Each row must be packed separately. Do not compress across row boundaries
-                _ => (1_000_000 + row_bytes - 1) / row_bytes,
+                let chunk_width = u64::from(width);
+                (data_unit_size, chunk_height, chunk_width)
+            }
+            ChunkType::Tile => {
+                let (chunk_width, chunk_height) = chunk_dims
+                    .expect("Must supply a valid tile size when constructing a tiled image");
+                let data_unit_size = u64::try_from(<T>::BITS_PER_SAMPLE.len())?;
+                (data_unit_size, chunk_height, chunk_width)
             }
         };
 
-        let strip_count = (u64::from(height) + rows_per_strip - 1) / rows_per_strip;
+        let chunks_per_row = (u64::from(width) + chunk_width - 1) / chunk_width;
+        let chunks_per_col = (u64::from(height) + chunk_height - 1) / chunk_height;
+        let chunk_count = chunks_per_row * chunks_per_col;
 
         encoder.write_tag(Tag::ImageWidth, width)?;
         encoder.write_tag(Tag::ImageLength, height)?;
@@ -378,9 +448,7 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         let sample_format: Vec<_> = <T>::SAMPLE_FORMAT.iter().map(|s| s.to_u16()).collect();
         encoder.write_tag(Tag::SampleFormat, &sample_format[..])?;
         encoder.write_tag(Tag::PhotometricInterpretation, <T>::TIFF_VALUE.to_u16())?;
-
-        encoder.write_tag(Tag::RowsPerStrip, u32::try_from(rows_per_strip)?)?;
-
+        
         encoder.write_tag(
             Tag::SamplesPerPixel,
             u16::try_from(<T>::BITS_PER_SAMPLE.len())?,
@@ -389,33 +457,172 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         encoder.write_tag(Tag::YResolution, Rational { n: 1, d: 1 })?;
         encoder.write_tag(Tag::ResolutionUnit, ResolutionUnit::None.to_u16())?;
 
+        match chunk_type {
+            ChunkType::Strip => {
+                encoder.write_tag(Tag::RowsPerStrip, chunk_height)?;
+            }
+            ChunkType::Tile => {
+                encoder.write_tag(Tag::TileWidth, chunk_width)?;
+                encoder.write_tag(Tag::TileLength, chunk_height)?;
+            }
+        }
+
+        println!("Encoder write position: {}", encoder.writer.offset());
+
+
+
         Ok(ImageEncoder {
             encoder,
-            strip_count,
-            strip_idx: 0,
-            row_samples,
-            rows_per_strip,
+            chunk_count,
+            data_idx: 0,
+            data_unit_size,
+            chunk_height,
             width,
             height,
-            strip_offsets: Vec::new(),
-            strip_byte_count: Vec::new(),
+            chunk_offsets: Vec::new(),
+            chunk_byte_count: Vec::new(),
             dropped: false,
             compression: compression,
             _phantom: ::std::marker::PhantomData,
+            chunk_width,
+            chunk_type,
+            chunks_per_col,
+            chunks_per_row,
         })
     }
 
-    /// Number of samples the next strip should have.
-    pub fn next_strip_sample_count(&self) -> u64 {
-        if self.strip_idx >= self.strip_count {
-            return 0;
+
+    pub fn next_chunk_dimensions(&self) -> (u64, u64) {
+        if self.data_idx >= self.chunk_count {
+            return (0, 0);
         }
 
-        let raw_start_row = self.strip_idx * self.rows_per_strip;
-        let start_row = cmp::min(u64::from(self.height), raw_start_row);
-        let end_row = cmp::min(u64::from(self.height), raw_start_row + self.rows_per_strip);
+        if self.chunk_type == ChunkType::Strip {
+            let raw_start_row = self.data_idx * self.chunk_height;
+            let start_row = cmp::min(u64::from(self.height), raw_start_row);
+            let end_row = cmp::min(u64::from(self.height), raw_start_row + self.chunk_height);
 
-        (end_row - start_row) * self.row_samples
+            (u64::from(self.width), end_row - start_row)
+        } else {
+            (self.chunk_width, self.chunk_height)
+        }
+    }
+
+    pub fn next_strip_sample_count(&self) -> u64 {
+        self.next_chunk_sample_count()
+    }
+
+    /// Number of samples the next strip should have.
+    pub fn next_chunk_sample_count(&self) -> u64 {
+        let dims = self.next_chunk_dimensions();
+        dims.0 * dims.1 * self.data_unit_size
+    }
+
+    pub fn write_chunk(&mut self, value: &[T::Inner]) -> TiffResult<()>
+    where
+        [T::Inner]: TiffValue,
+    {
+        let samples = self.next_chunk_sample_count();
+        if u64::try_from(value.len())? != samples {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Slice is wrong size for chunk",
+            )
+            .into());
+        }
+        
+        // Write the (possibly compressed) data to the encoder.
+        let offset = self.encoder.write_data(value)?;
+        
+
+        let byte_count = self.encoder.last_written() as usize;
+
+        self.chunk_offsets.push(K::convert_offset(offset)?);
+        self.chunk_byte_count.push(byte_count.try_into()?);
+
+        self.data_idx += 1;
+        Ok(())
+    }
+
+    // chunk_writer_from stream
+    pub async fn write_chunks_from_stream(
+        &mut self,
+        stream: impl Stream<Item = Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>
+    ) -> TiffResult<()> {
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>>>> = Vec::new();
+        let mut pin = Box::pin(stream);
+        let compression = Arc::new(Mutex::new(self.compression.get_algorithm().clone()));
+
+        let n = 0;
+
+        while let Some(slice_result) = pin.next().await {
+            if tasks.len() == 8 {
+                for result in join_all(tasks).await {
+                    let compressed_data = result.unwrap().unwrap();
+                    let byte_count = compressed_data.len();
+                    let offset = self.encoder.writer.offset();
+                    self.encoder.writer.write_bytes(&compressed_data)?;
+                    self.chunk_offsets.push(K::convert_offset(offset)?);
+                    self.chunk_byte_count.push(byte_count.try_into()?);
+                    self.data_idx += 1;
+                    
+                    if self.data_idx % 100 == 0 {
+                        println!("{} chunks written", self.data_idx);
+                    }
+                }
+                tasks = Vec::new();
+            }
+
+            match slice_result {
+                Ok(slice) => {
+                    let data = slice.to_vec(); // clone the slice to move it into the closure
+                    let compression = Arc::clone(&compression); // clone the Arc to move it into the closure
+                    tasks.push(tokio::spawn(async move {
+                        let mut compressed_data = Vec::new();
+                        let mut compressor = compression.lock().await.clone();
+                        match compressor.write_to(&mut compressed_data, &data) {
+                            Ok(_) => Ok(compressed_data),
+                            Err(e) => Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
+                        }
+                    }));
+                },
+                Err(_) => return Err(TiffError::ThreadError),
+            }
+        }
+        
+        if !tasks.is_empty() {
+            for result in join_all(tasks).await {
+                let compressed_data = result.unwrap().unwrap();
+                let byte_count = compressed_data.len();
+                let offset = self.encoder.writer.offset();
+                self.encoder.writer.write_bytes(&compressed_data)?;
+                self.chunk_offsets.push(K::convert_offset(offset)?);
+                self.chunk_byte_count.push(byte_count.try_into()?);
+                self.data_idx += 1;
+                if self.data_idx % 100 == 0 {
+                    println!("{} chunks written", self.data_idx);
+                }
+            }
+        }        
+        
+        TiffResult::from(Ok(()))
+
+    }
+
+
+    pub fn write_chunk_with_compression(&mut self, value: &[T::Inner]) -> TiffResult<()>
+    where
+        [T::Inner]: TiffValue,
+    {
+        
+
+        self.encoder
+            .writer
+            .set_compression(self.compression.get_algorithm());
+        let result = self.write_chunk(value);
+        self.encoder.writer.reset_compression();
+        result
+        
     }
 
     /// Write a single strip.
@@ -423,24 +630,7 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
     where
         [T::Inner]: TiffValue,
     {
-        let samples = self.next_strip_sample_count();
-        if u64::try_from(value.len())? != samples {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Slice is wrong size for strip",
-            )
-            .into());
-        }
-
-        // Write the (possible compressed) data to the encoder.
-        let offset = self.encoder.write_data(value)?;
-        let byte_count = self.encoder.last_written() as usize;
-
-        self.strip_offsets.push(K::convert_offset(offset)?);
-        self.strip_byte_count.push(byte_count.try_into()?);
-
-        self.strip_idx += 1;
-        Ok(())
+        self.write_chunk(value)
     }
 
     /// Write strips from data
@@ -469,9 +659,9 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
             .set_compression(self.compression.get_algorithm());
 
         let mut idx = 0;
-        while self.next_strip_sample_count() > 0 {
-            let sample_count = usize::try_from(self.next_strip_sample_count())?;
-            self.write_strip(&data[idx..idx + sample_count])?;
+        while self.next_chunk_sample_count() > 0 {
+            let sample_count = usize::try_from(self.next_chunk_sample_count())?;
+            self.write_chunk(&data[idx..idx + sample_count])?;
             idx += sample_count;
         }
 
@@ -508,12 +698,28 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         self.encoder.write_tag(Tag::YResolution, value).unwrap();
     }
 
+    /// Set image subfiletype
+    pub fn subfiletype(&mut self, value: SubfileType) {
+        self.encoder.write_tag(Tag::SubfileType, value.to_u16()).unwrap();
+    }
+
+    /// Set image newsubfiletype
+    pub fn newsubfiletype(&mut self, value: NewSubfileType) {
+        self.encoder
+            .write_tag(Tag::NewSubfileType, value.to_u16())
+            .unwrap();
+    }
+
+    pub fn get_chunk_dim_counts(&self) -> (u64, u64) {
+        (self.chunks_per_row, self.chunks_per_col)
+    }
+
     /// Set image number of lines per strip
     ///
     /// This function needs to be called before any calls to `write_data` or
     /// `write_strip` and will return an error otherwise.
     pub fn rows_per_strip(&mut self, value: u32) -> TiffResult<()> {
-        if self.strip_idx != 0 {
+        if self.data_idx != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "Cannot change strip size after data was written",
@@ -524,19 +730,31 @@ impl<'a, W: 'a + Write + Seek, T: ColorType, K: TiffKind, D: Compression>
         self.encoder.write_tag(Tag::RowsPerStrip, value)?;
 
         let value: u64 = value as u64;
-        self.strip_count = (self.height as u64 + value - 1) / value;
-        self.rows_per_strip = value;
+        self.chunk_count = (self.height as u64 + value - 1) / value;
+        self.chunk_height = value;
 
         Ok(())
     }
 
     fn finish_internal(&mut self) -> TiffResult<()> {
-        self.encoder
-            .write_tag(Tag::StripOffsets, K::convert_slice(&self.strip_offsets))?;
-        self.encoder.write_tag(
-            Tag::StripByteCounts,
-            K::convert_slice(&self.strip_byte_count),
-        )?;
+        match self.chunk_type {
+            ChunkType::Strip => {
+                self.encoder
+                    .write_tag(Tag::StripOffsets, K::convert_slice(&self.chunk_offsets))?;
+                self.encoder.write_tag(
+                    Tag::StripByteCounts,
+                    K::convert_slice(&self.chunk_byte_count),
+                )?;
+            }
+            ChunkType::Tile => {
+                self.encoder
+                    .write_tag(Tag::TileOffsets, K::convert_slice(&self.chunk_offsets))?;
+                self.encoder.write_tag(
+                    Tag::TileByteCounts,
+                    K::convert_slice(&self.chunk_byte_count),
+                )?;
+            }
+        }
         self.dropped = true;
 
         self.encoder.finish_internal()

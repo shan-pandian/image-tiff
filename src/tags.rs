@@ -172,7 +172,7 @@ pub enum Type(u16) {
 tags! {
 /// See [TIFF compression tags](https://www.awaresystems.be/imaging/tiff/tifftags/compression.html)
 /// for reference.
-pub enum CompressionMethod(u16) {
+pub enum CompressionMethod(u16) unknown("A custom compression method") {
     None = 1,
     Huffman = 2,
     Fax3 = 3,
@@ -231,4 +231,21 @@ pub enum SampleFormat(u16) unknown("An unknown extension sample format") {
     IEEEFP = 3,
     Void = 4,
 }
+}
+
+tags! {
+    pub enum SubfileType(u16) {
+        FullResolutionImage = 1,
+        ReducedResolutionImage = 2,
+        SinglePageOfMultiPageImage = 3,
+    }
+}
+
+tags! {
+    pub enum NewSubfileType(u16) {
+        FullResolutionImage = 0,
+        ReducedResolutionImage = 1,
+        SinglePageOfMultiPageImage = 2,
+        TransparencyMask = 4,
+    }
 }
