@@ -2,14 +2,17 @@ use crate::tags::CompressionMethod;
 use std::io::{self, Write};
 
 mod deflate;
+mod jpeg;
 mod lzw;
 mod packbits;
 mod uncompressed;
+
 
 pub use self::deflate::{Deflate, DeflateLevel};
 pub use self::lzw::Lzw;
 pub use self::packbits::Packbits;
 pub use self::uncompressed::Uncompressed;
+pub use self::jpeg::Jpeg;
 
 /// An algorithm used for compression
 pub trait CompressionAlgorithm {
@@ -35,6 +38,7 @@ pub enum Compressor {
     Lzw(Lzw),
     Deflate(Deflate),
     Packbits(Packbits),
+    Jpeg(Jpeg),
 }
 
 impl Default for Compressor {
@@ -51,6 +55,7 @@ impl CompressionAlgorithm for Compressor {
             Compressor::Lzw(algorithm) => algorithm.write_to(writer, bytes),
             Compressor::Deflate(algorithm) => algorithm.write_to(writer, bytes),
             Compressor::Packbits(algorithm) => algorithm.write_to(writer, bytes),
+            Compressor::Jpeg(_) => todo!(),
         }
     }
 }
