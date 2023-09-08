@@ -58,8 +58,6 @@ impl CompressionAlgorithm for Jpeg {
         writer.write_all(&encoded_jpeg)?;
         writer.flush()?;
 
-        println!("encoded data {:?}", encoded_jpeg);
-
         Ok(encoded_jpeg.len() as u64)        
     }
 }
