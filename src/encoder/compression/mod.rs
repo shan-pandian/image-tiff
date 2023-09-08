@@ -55,7 +55,7 @@ impl CompressionAlgorithm for Compressor {
             Compressor::Lzw(algorithm) => algorithm.write_to(writer, bytes),
             Compressor::Deflate(algorithm) => algorithm.write_to(writer, bytes),
             Compressor::Packbits(algorithm) => algorithm.write_to(writer, bytes),
-            Compressor::Jpeg(_) => todo!(),
+            Compressor::Jpeg(algorithm) => algorithm.write_to(writer, bytes),
         }
     }
 }
